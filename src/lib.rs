@@ -3,6 +3,7 @@
 
 mod components;
 mod surface;
+mod widget;
 
 pub use components::*;
 use crossterm::{
@@ -51,6 +52,7 @@ use std::{
   },
 };
 pub use surface::*;
+pub use widget::*;
 
 #[macro_use]
 mod utils;
@@ -71,16 +73,6 @@ api_planning! {
 
 pub type ArcWidget = Arc<Mutex<dyn Widget>>;
 pub type ArcView = Arc<Mutex<View>>;
-
-pub trait Widget: fmt::Debug + Send + Sync {
-  fn name(&self) -> Cow<'static, str> {
-    std::any::type_name::<Self>().into()
-  }
-
-  fn layout(&mut self, limits: Limits) -> Size;
-
-  fn draw(&self, surface: &mut dyn DrawSurface);
-}
 
 pub trait IntoView {
   fn into_view(self, cx: Scope) -> View;
