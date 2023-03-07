@@ -70,9 +70,7 @@ impl Widget for Text {
       .enumerate()
       .take(size.height as usize)
     {
-      surface.write(XY { x: 0, y: i as u16 }, line).expect(
-        "text should not overflow, if you see this, please file a bug report",
-      );
+      surface.write(XY { x: 0, y: i as u16 }, line);
     }
   }
 }
@@ -114,108 +112,167 @@ fn get_text_size(limits: Limits, text: &str) -> Size {
 mod tests {
   use super::*;
 
-  #[test]
-  fn text_fits_on_one_line() {
-    let size = get_text_size(
-      Limits {
-        min_width: 0,
-        min_height: 0,
-        max_width: 10,
-        max_height: 10,
-      },
-      "Hello",
-    );
+  mod layout {
+    use super::*;
 
-    assert_eq!(
-      size,
-      Size {
-        width: 10,
-        height: 1
-      }
-    );
+    #[test]
+    fn text_fits_on_one_line() {
+      let size = get_text_size(
+        Limits {
+          min_width: 0,
+          min_height: 0,
+          max_width: 10,
+          max_height: 10,
+        },
+        "Hello",
+      );
+
+      assert_eq!(
+        size,
+        Size {
+          width: 10,
+          height: 1
+        }
+      );
+    }
+
+    #[test]
+    fn text_fits_on_two_lines() {
+      let size = get_text_size(
+        Limits {
+          min_width: 0,
+          min_height: 0,
+          max_width: 10,
+          max_height: 10,
+        },
+        "Hello there",
+      );
+
+      assert_eq!(
+        size,
+        Size {
+          width: 10,
+          height: 2
+        }
+      );
+    }
+
+    #[test]
+    fn too_much_text_fits_on_one_line_within_limits() {
+      let size = get_text_size(
+        Limits {
+          min_width: 0,
+          min_height: 0,
+          max_width: 10,
+          max_height: 1,
+        },
+        "Hello there",
+      );
+
+      assert_eq!(
+        size,
+        Size {
+          width: 10,
+          height: 1,
+        }
+      );
+    }
+
+    #[test]
+    fn text_with_new_lines_gets_right_size() {
+      let size = get_text_size(
+        Limits {
+          min_width: 0,
+          min_height: 0,
+          max_width: 100,
+          max_height: 10,
+        },
+        "Hello there!\nHow are you?",
+      );
+
+      assert_eq!(
+        size,
+        Size {
+          width: 100,
+          height: 2,
+        }
+      );
+    }
+
+    #[test]
+    fn text_with_new_lines_gets_right_size_and_splits_on_whitespace() {
+      let size = get_text_size(
+        Limits {
+          min_width: 0,
+          min_height: 0,
+          max_width: 10,
+          max_height: 10,
+        },
+        "Hello there!\nHow are you?",
+      );
+
+      assert_eq!(
+        size,
+        Size {
+          width: 10,
+          height: 4,
+        }
+      );
+    }
   }
 
-  #[test]
-  fn text_fits_on_two_lines() {
-    let size = get_text_size(
-      Limits {
-        min_width: 0,
-        min_height: 0,
-        max_width: 10,
-        max_height: 10,
-      },
-      "Hello there",
-    );
+  mod widget {
+    use super::*;
+    use crate::{
+      components::get_widget_output,
+      BufDrawSurface,
+    };
+    use crossterm::{
+      cursor::MoveTo,
+      style::Print,
+    };
 
-    assert_eq!(
-      size,
-      Size {
-        width: 10,
-        height: 2
-      }
-    );
-  }
+    #[test]
+    fn renders() {
+      let (size, output) =
+        get_widget_output(Text::new("hello"), (5, 1), (0, 0));
 
-  #[test]
-  fn too_much_text_fits_on_one_line_within_limits() {
-    let size = get_text_size(
-      Limits {
-        min_width: 0,
-        min_height: 0,
-        max_width: 10,
-        max_height: 1,
-      },
-      "Hello there",
-    );
+      assert_eq!(size, (5, 1).into());
 
-    assert_eq!(
-      size,
-      Size {
-        width: 10,
-        height: 1,
-      }
-    );
-  }
+      assert_eq!(output, commands![MoveTo(0, 0), Print("hello")]);
+    }
 
-  #[test]
-  fn text_with_new_lines_gets_right_size() {
-    let size = get_text_size(
-      Limits {
-        min_width: 0,
-        min_height: 0,
-        max_width: 100,
-        max_height: 10,
-      },
-      "Hello there!\nHow are you?",
-    );
+    #[test]
+    fn aligns_left() {
+      let (size, output) =
+        get_widget_output(Text::new("hello   "), (8, 1), (0, 0));
 
-    assert_eq!(
-      size,
-      Size {
-        width: 100,
-        height: 2,
-      }
-    );
-  }
+      assert_eq!(size, (5, 1).into());
 
-  #[test]
-  fn text_with_new_lines_gets_right_size_and_splits_on_whitespace() {
-    let size = get_text_size(
-      Limits {
-        min_width: 0,
-        min_height: 0,
-        max_width: 10,
-        max_height: 10,
-      },
-      "Hello there!\nHow are you?",
-    );
+      assert_eq!(output, commands![MoveTo(0, 0), Print("hello")]);
+    }
 
-    assert_eq!(
-      size,
-      Size {
-        width: 10,
-        height: 4,
-      }
-    );
+    #[test]
+    fn clipps() {
+      let (size, output) =
+        get_widget_output(Text::new("hello   "), (1, 1), (0, 0));
+
+      assert_eq!(size, (1, 1).into());
+
+      assert_eq!(output, commands![MoveTo(0, 0), Print("h")]);
+    }
+
+    #[test]
+    fn renders_multiple_lines() {
+      let (size, output) =
+        get_widget_output(Text::new("hello\nthere"), (5, 2), (0, 0));
+
+      assert_eq!(size, (5, 2).into());
+
+      assert_eq!(
+        output,
+        commands!(MoveTo(0, 0), Print("hello"), MoveTo(0, 1), Print("there"))
+      );
+    }
   }
 }

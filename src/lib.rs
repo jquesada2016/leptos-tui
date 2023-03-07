@@ -1,11 +1,16 @@
 #![feature(panic_update_hook, closure_track_caller)]
 #![allow(warnings)]
 
+mod components;
+mod surface;
+
 pub use components::*;
 use crossterm::{
   cursor::{
+    Hide,
     MoveTo,
     MoveToNextLine,
+    Show,
   },
   event::{
     DisableMouseCapture,
@@ -15,11 +20,17 @@ use crossterm::{
     KeyEvent,
     KeyModifiers,
   },
-  style::Print,
+  style::{
+    Attribute,
+    Color,
+    Print,
+    Stylize,
+  },
   terminal::{
     BeginSynchronizedUpdate,
     Clear,
     ClearType,
+    EndSynchronizedUpdate,
     EnterAlternateScreen,
     LeaveAlternateScreen,
   },
@@ -39,7 +50,7 @@ use std::{
     Mutex,
   },
 };
-mod components;
+pub use surface::*;
 
 #[macro_use]
 mod utils;
@@ -61,53 +72,10 @@ api_planning! {
 pub type ArcWidget = Arc<Mutex<dyn Widget>>;
 pub type ArcView = Arc<Mutex<View>>;
 
-pub trait DrawSurface {
-  fn size(&self) -> Size;
-
-  /// Writes the given data starting at the given coordinates.
-  /// Returns [`Err`] with the data that was written out of bounds,
-  /// if any.
-  ///
-  /// Note:
-  /// The coordinates are relative to the provided [`Limits`]
-  /// and are not absolute.
-  fn write<'a>(&mut self, at: XY, data: &'a str) -> Result<(), &'a str>;
-
-  fn shrink(
-    &mut self,
-    top_left: XY,
-    size: Size,
-    f: Box<dyn FnOnce(&mut dyn DrawSurface) + '_>,
-  );
-
-  fn shrink_centered(
-    &mut self,
-    size: Size,
-    f: Box<dyn FnOnce(&mut dyn DrawSurface) + '_>,
-  ) {
-    let surface_size = self.size();
-
-    debug_assert!(
-      surface_size >= size,
-      "size to shrink by is larger than available area",
-    );
-
-    let x_offset = (surface_size.width - size.width) / 2;
-    let y_offset = (surface_size.height - size.height) / 2;
-
-    self.shrink(
-      XY {
-        x: x_offset,
-        y: y_offset,
-      },
-      size,
-      f,
-    )
-  }
-}
-
 pub trait Widget: fmt::Debug + Send + Sync {
-  fn name(&self) -> Cow<'static, str>;
+  fn name(&self) -> Cow<'static, str> {
+    std::any::type_name::<Self>().into()
+  }
 
   fn layout(&mut self, limits: Limits) -> Size;
 
@@ -215,6 +183,53 @@ pub struct Limits {
   pub max_height: u16,
 }
 
+/// Converts the tuple using strict `[Limits]` of `(width, height)`.
+impl From<(u16, u16)> for Limits {
+  fn from((width, height): (u16, u16)) -> Self {
+    Self::strict(width, height)
+  }
+}
+
+/// Converts the tuple using strict `[Limits]` of
+/// `(max width, min_width, max_height, min_height)`.
+impl From<(u16, u16, u16, u16)> for Limits {
+  fn from(
+    (max_width, min_width, max_height, min_height): (u16, u16, u16, u16),
+  ) -> Self {
+    Self {
+      min_width,
+      max_width,
+      min_height,
+      max_height,
+    }
+  }
+}
+
+/// Converts the tuple using `(max_size, min_size)`.
+impl<S1, S2> From<(S1, S2)> for Limits
+where
+  S1: Into<Size>,
+  S2: Into<Size>,
+{
+  fn from((max_size, min_size): (S1, S2)) -> Self {
+    let Size {
+      width: max_width,
+      height: max_height,
+    } = max_size.into();
+    let Size {
+      width: min_width,
+      height: min_height,
+    } = min_size.into();
+
+    Self {
+      min_width,
+      max_width,
+      min_height,
+      max_height,
+    }
+  }
+}
+
 impl Limits {
   /// Gets the [`Size`] of the area represented by these [`Limits`].
   pub fn max_size(self) -> Size {
@@ -246,12 +261,6 @@ impl Limits {
       max_height: height,
     }
   }
-
-  fn from_stdout() -> Self {
-    let (width, height) = crossterm::terminal::size().unwrap();
-
-    Limits::strict(width, height)
-  }
 }
 
 impl std::cmp::PartialOrd for Size {
@@ -272,10 +281,20 @@ pub struct Size {
   pub height: u16,
 }
 
+impl From<(u16, u16)> for Size {
+  fn from((width, height): (u16, u16)) -> Self {
+    Self { width, height }
+  }
+}
+
 impl Size {
   /// Gets the length of the area of this [`Size`]. Equals `width * height`.
   pub fn linear_length(self) -> usize {
     self.width as usize * self.height as usize
+  }
+
+  pub fn into_strict_limits(self) -> Limits {
+    Limits::strict(self.width, self.height)
   }
 }
 
@@ -285,95 +304,9 @@ pub struct XY {
   pub y: u16,
 }
 
-#[derive(Debug)]
-struct StdOutDrawSurface {
-  stdout: BufWriter<std::io::Stdout>,
-  top_left: XY,
-  size: Size,
-}
-
-impl Default for StdOutDrawSurface {
-  fn default() -> Self {
-    Self {
-      stdout: BufWriter::new(std::io::stdout()),
-      top_left: XY::default(),
-      size: Size::default(),
-    }
-  }
-}
-
-impl DrawSurface for StdOutDrawSurface {
-  fn size(&self) -> Size {
-    self.size
-  }
-
-  fn write<'a>(&mut self, at: XY, data: &'a str) -> Result<(), &'a str> {
-    let lines = data.lines().collect::<Vec<_>>();
-
-    if at.y + lines.len() as u16 > self.size.height {
-      return Err(lines[self.size.height as usize]);
-    }
-
-    if let Some(pos) = lines
-      .iter()
-      .position(|line| line.len() as u16 > at.x + self.size.width)
-    {
-      return Err(lines[pos]);
-    }
-
-    if at.x + data.len() as u16 > self.size.width {
-      return Err(&data[self.size.width as usize..]);
-    }
-
-    let start_at = self.top_left + at;
-
-    self.stdout.queue(MoveTo(start_at.x, start_at.y)).unwrap();
-
-    for line in lines {
-      self
-        .stdout
-        .queue(Print(line))
-        .unwrap()
-        .queue(MoveToNextLine(1))
-        .unwrap();
-    }
-
-    Ok(())
-  }
-
-  fn shrink(
-    &mut self,
-    top_left: XY,
-    size: Size,
-    f: Box<dyn FnOnce(&mut dyn DrawSurface) + '_>,
-  ) {
-    let original_top_left = self.top_left;
-    let original_size = self.size;
-
-    debug_assert!(
-      top_left.x < original_size.width && top_left.y < original_size.height,
-      "attempted to shrink with `top_left` position being out of \
-       bounds\navailable size: {original_size:?}\ndesired top left: \
-       {top_left:?}",
-    );
-
-    debug_assert!(
-      original_top_left.x + top_left.x + size.width
-        <= original_top_left.x + original_size.width
-        && original_top_left.y + top_left.y + size.height
-          <= original_top_left.y + original_size.height,
-      "attempted to shrink with a `size` larger than the available \
-       space\navailable size: {original_size:?}\ndesired top left: \
-       {top_left:?}\ndesired size: {size:?}\n",
-    );
-
-    self.top_left = self.top_left + top_left;
-    self.size = size;
-
-    f(self);
-
-    self.top_left = original_top_left;
-    self.size = original_size;
+impl From<(u16, u16)> for XY {
+  fn from((x, y): (u16, u16)) -> Self {
+    XY { x, y }
   }
 }
 
@@ -382,9 +315,15 @@ pub fn run<V: IntoView>(f: impl FnOnce(Scope) -> V + 'static) {
   // Update the panic hook to make sure we leave the terminal in a
   // usable state on panic
   std::panic::update_hook(|prev, info| {
+    use std::io::Write;
+
     cleanup_screen();
 
-    prev(info)
+    prev(info);
+
+    let mut file = std::fs::File::create("panic.txt").unwrap();
+
+    write!(file, "{}", info);
   });
 
   let runtime = leptos_reactive::create_runtime();
@@ -397,7 +336,7 @@ pub fn run<V: IntoView>(f: impl FnOnce(Scope) -> V + 'static) {
     move |cx| {
       let mut view = f(cx).into_view(cx);
 
-      let mut surface = StdOutDrawSurface::default();
+      let mut surface = BufDrawSurface::default();
 
       render_view(&mut surface, &mut view);
 
@@ -414,6 +353,11 @@ pub fn run<V: IntoView>(f: impl FnOnce(Scope) -> V + 'static) {
             }
             _ => {}
           },
+          Event::Resize(width, height) => {
+            surface.resize(Size { width, height });
+
+            render_view(&mut surface, &mut view);
+          }
           _ => {}
         }
       }
@@ -442,16 +386,22 @@ fn cleanup_screen() {
   crossterm::terminal::disable_raw_mode();
 
   stdout
+    .queue(EndSynchronizedUpdate)
+    .unwrap()
+    .queue(Clear(ClearType::All))
+    .unwrap()
     .queue(LeaveAlternateScreen)
     .unwrap()
     .queue(DisableMouseCapture)
+    .unwrap()
+    .queue(Show)
     .unwrap()
     .flush();
 }
 
 #[track_caller]
-fn render_view(surface: &mut StdOutDrawSurface, view: &mut View) {
-  let limits = Limits::from_stdout();
+fn render_view(surface: &mut StdoutDrawSurface, view: &mut View) {
+  let limits = surface.size().into_strict_limits();
 
   surface.size = limits.max_size();
   surface.top_left = XY::default();
@@ -465,13 +415,15 @@ fn render_view(surface: &mut StdOutDrawSurface, view: &mut View) {
   );
 
   surface
-    .stdout
+    .buf
     .queue(BeginSynchronizedUpdate)
     .unwrap()
     .queue(Clear(ClearType::All))
+    .unwrap()
+    .queue(Hide)
     .unwrap();
 
   view.draw(surface);
 
-  surface.stdout.flush().unwrap();
+  surface.buf.flush().unwrap();
 }
